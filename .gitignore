@@ -1,0 +1,14 @@
+cookies.json
+chrome_profile/
+__pycache__/
+*.pyc
+*.pyo
+.venv/
+venv/
+env/
+.DS_Store
+.idea/
+.vscode/
+*.sqlite
+*.db
+.env
