@@ -15,7 +15,7 @@ from datetime import datetime
 from pathlib import Path
 
 from . import db
-from .client import ShopeeAPIError, ShopeeClient
+from .client import HybridClient, ShopeeAPIError, ShopeeClient
 from .resolver import ShopRef, resolve
 from .tracker import DiffReport, track_shop
 
@@ -91,6 +91,20 @@ def print_product(index: int, item: dict) -> None:
     )
 
 
+def _build_client(args: argparse.Namespace):
+    engine = getattr(args, "engine", "curl")
+    headless = not getattr(args, "show_browser", False)
+    if engine == "curl":
+        return ShopeeClient()
+    if engine == "playwright":
+        from .playwright_client import PlaywrightShopeeClient
+
+        return PlaywrightShopeeClient(headless=headless)
+    if engine == "hybrid":
+        return HybridClient(headless=headless)
+    raise ValueError(f"Engine không hợp lệ: {engine}")
+
+
 def _resolve_or_exit(url: str) -> ShopRef:
     print(f"[~] Resolving: {url}")
     ref = resolve(url)
@@ -104,36 +118,36 @@ def _resolve_or_exit(url: str) -> ShopRef:
 
 def cmd_info(args: argparse.Namespace) -> int:
     ref = _resolve_or_exit(args.url)
-    client = ShopeeClient()
-    try:
-        detail = client.shop_detail(username=ref.username, shopid=ref.shopid)
-    except ShopeeAPIError as e:
-        print(f"shop_detail lỗi: {e}", file=sys.stderr)
-        return 1
-    data = detail.get("data") or {}
-    if not data:
-        print(f"Response không có data: {detail}", file=sys.stderr)
-        return 1
-    print_shop_header(data)
+    with _build_client(args) as client:
+        try:
+            detail = client.shop_detail(username=ref.username, shopid=ref.shopid)
+        except ShopeeAPIError as e:
+            print(f"shop_detail lỗi: {e}", file=sys.stderr)
+            return 1
+        data = detail.get("data") or {}
+        if not data:
+            print(f"Response không có data: {detail}", file=sys.stderr)
+            return 1
+        print_shop_header(data)
 
-    shopid = str(data.get("shopid") or ref.shopid)
-    username = (data.get("account") or {}).get("username") or ref.username
+        shopid = str(data.get("shopid") or ref.shopid)
+        username = (data.get("account") or {}).get("username") or ref.username
 
-    print(f"\nLấy {args.limit} sản phẩm...\n")
-    try:
-        count = 0
-        for i, item in enumerate(
-            client.iter_shop_products(
-                shopid=shopid, max_items=args.limit, referer_username=username
-            ),
-            start=1,
-        ):
-            print_product(i, item)
-            count += 1
-        print(f"\n→ Đã lấy {count} sản phẩm.")
-    except ShopeeAPIError as e:
-        print(f"search_items lỗi: {e}", file=sys.stderr)
-        return 1
+        print(f"\nLấy {args.limit} sản phẩm...\n")
+        try:
+            count = 0
+            for i, item in enumerate(
+                client.iter_shop_products(
+                    shopid=shopid, max_items=args.limit, referer_username=username
+                ),
+                start=1,
+            ):
+                print_product(i, item)
+                count += 1
+            print(f"\n→ Đã lấy {count} sản phẩm.")
+        except ShopeeAPIError as e:
+            print(f"search_items lỗi: {e}", file=sys.stderr)
+            return 1
     return 0
 
 
@@ -206,19 +220,22 @@ def _print_diff_report(report: DiffReport) -> None:
 
 def cmd_track(args: argparse.Namespace) -> int:
     ref = _resolve_or_exit(args.url)
-    client = ShopeeClient()
-    print(f"\n[~] Crawl + snapshot → {args.db} (limit={args.limit}, full={args.full})")
-    try:
-        report = track_shop(
-            ref=ref,
-            client=client,
-            limit=args.limit,
-            db_path=Path(args.db),
-            detect_removed=args.full,
-        )
-    except ShopeeAPIError as e:
-        print(f"Crawl lỗi: {e}", file=sys.stderr)
-        return 1
+    print(
+        f"\n[~] Crawl + snapshot → {args.db} "
+        f"(engine={args.engine}, limit={args.limit}, full={args.full})"
+    )
+    with _build_client(args) as client:
+        try:
+            report = track_shop(
+                ref=ref,
+                client=client,
+                limit=args.limit,
+                db_path=Path(args.db),
+                detect_removed=args.full,
+            )
+        except ShopeeAPIError as e:
+            print(f"Crawl lỗi: {e}", file=sys.stderr)
+            return 1
     _print_diff_report(report)
     return 0
 
@@ -265,12 +282,34 @@ def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="shopee_tracker")
     sub = p.add_subparsers(dest="cmd", required=True)
 
-    p_info = sub.add_parser("info", help="In thông tin shop + danh sách SP (không ghi DB)")
+    engine_parent = argparse.ArgumentParser(add_help=False)
+    engine_parent.add_argument(
+        "--engine",
+        choices=["curl", "playwright", "hybrid"],
+        default="curl",
+        help="curl (default, nhanh) | playwright (browser thật) | "
+        "hybrid (curl trước, fallback Playwright khi bị block)",
+    )
+    engine_parent.add_argument(
+        "--show-browser",
+        action="store_true",
+        help="Với playwright/hybrid: chạy non-headless (thấy cửa sổ Chromium)",
+    )
+
+    p_info = sub.add_parser(
+        "info",
+        parents=[engine_parent],
+        help="In thông tin shop + danh sách SP (không ghi DB)",
+    )
     p_info.add_argument("url")
     p_info.add_argument("--limit", type=int, default=30)
     p_info.set_defaults(func=cmd_info)
 
-    p_track = sub.add_parser("track", help="Crawl, lưu snapshot, và in diff vs lần trước")
+    p_track = sub.add_parser(
+        "track",
+        parents=[engine_parent],
+        help="Crawl, lưu snapshot, và in diff vs lần trước",
+    )
     p_track.add_argument("url")
     p_track.add_argument("--limit", type=int, default=100)
     p_track.add_argument("--db", default=str(db.DEFAULT_DB))

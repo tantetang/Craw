@@ -13,8 +13,6 @@ import time
 from pathlib import Path
 from typing import Any
 
-from curl_cffi import requests
-
 COOKIE_FILE = Path("cookies.json")
 BASE = "https://shopee.vn"
 DEFAULT_IMPERSONATE = "chrome124"
@@ -32,6 +30,8 @@ class ShopeeClient:
         min_delay: float = 1.8,
         max_delay: float = 4.2,
     ) -> None:
+        from curl_cffi import requests  # lazy: chỉ cần khi thực sự gọi mạng
+
         self.min_delay = min_delay
         self.max_delay = max_delay
         self.session = requests.Session(impersonate=impersonate)
@@ -45,6 +45,18 @@ class ShopeeClient:
             }
         )
         self._load_cookies(cookie_file)
+
+    def close(self) -> None:
+        try:
+            self.session.close()
+        except Exception:
+            pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
 
     def _load_cookies(self, cookie_file: Path) -> None:
         if not cookie_file.exists():
@@ -148,3 +160,112 @@ class ShopeeClient:
             if len(batch) < page_size:
                 return
             offset += page_size
+
+
+# --- Hybrid (curl → Playwright fallback) ---------------------------------
+
+
+# Substrings in ShopeeAPIError messages that suggest Shopee is blocking
+# curl_cffi specifically, and that a real browser is worth trying.
+_BLOCK_SIGNALS = (
+    "HTTP 403",
+    "HTTP 429",
+    "Rate-limited",
+    "không phải JSON",
+    "captcha",
+    "CAPTCHA",
+)
+
+
+def _looks_blocked(err: ShopeeAPIError) -> bool:
+    s = str(err)
+    return any(sig in s for sig in _BLOCK_SIGNALS)
+
+
+class HybridClient:
+    """Try curl_cffi first; on block-like errors, switch to Playwright and stay.
+
+    Keeps the same public methods as ShopeeClient so tracker code is agnostic.
+    """
+
+    def __init__(
+        self,
+        cookie_file: Path = COOKIE_FILE,
+        user_data_dir: Path | None = None,
+        headless: bool = True,
+    ) -> None:
+        self._curl = ShopeeClient(cookie_file=cookie_file)
+        self._pw = None  # lazy
+        self._blocked = False
+        self._cookie_file = cookie_file
+        self._user_data_dir = user_data_dir
+        self._headless = headless
+
+    def _get_pw(self):
+        if self._pw is None:
+            from .playwright_client import DEFAULT_PROFILE_DIR, PlaywrightShopeeClient
+
+            print("[HybridClient] Khởi động Playwright fallback...")
+            self._pw = PlaywrightShopeeClient(
+                user_data_dir=self._user_data_dir or DEFAULT_PROFILE_DIR,
+                cookie_file=self._cookie_file,
+                headless=self._headless,
+            )
+            self._blocked = True
+        return self._pw
+
+    def close(self) -> None:
+        try:
+            self._curl.close()
+        finally:
+            if self._pw is not None:
+                self._pw.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        self.close()
+
+    def _call(self, method: str, *args, **kwargs):
+        if self._blocked:
+            return getattr(self._get_pw(), method)(*args, **kwargs)
+        try:
+            return getattr(self._curl, method)(*args, **kwargs)
+        except ShopeeAPIError as e:
+            if _looks_blocked(e):
+                print(f"[HybridClient] curl bị block ({e}) → fallback Playwright")
+                return getattr(self._get_pw(), method)(*args, **kwargs)
+            raise
+
+    def shop_detail(self, **kwargs):
+        return self._call("shop_detail", **kwargs)
+
+    def shop_products_page(self, *args, **kwargs):
+        return self._call("shop_products_page", *args, **kwargs)
+
+    def iter_shop_products(self, *args, **kwargs):
+        seen: set[int] = set()
+        if not self._blocked:
+            try:
+                for item in self._curl.iter_shop_products(*args, **kwargs):
+                    try:
+                        seen.add(int(item["itemid"]))
+                    except (KeyError, TypeError, ValueError):
+                        pass
+                    yield item
+                return
+            except ShopeeAPIError as e:
+                if not _looks_blocked(e):
+                    raise
+                print(
+                    f"[HybridClient] curl bị block giữa chừng ({e}) → chuyển Playwright"
+                )
+
+        for item in self._get_pw().iter_shop_products(*args, **kwargs):
+            try:
+                if int(item["itemid"]) in seen:
+                    continue
+            except (KeyError, TypeError, ValueError):
+                pass
+            yield item
