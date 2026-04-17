@@ -16,6 +16,7 @@ from pathlib import Path
 from playwright.sync_api import sync_playwright
 
 from .proxy import for_playwright, load_proxy
+from .stealth import STEALTH_LAUNCH_ARGS, STEALTH_USER_AGENT, apply_stealth, warm_up
 
 COOKIE_FILE = Path("cookies.json")
 LOGIN_URL = "https://shopee.vn/buyer/login"
@@ -29,15 +30,23 @@ def run(cookie_file: Path = COOKIE_FILE) -> None:
         print(f"[session] Dùng proxy: {proxy.display()}")
 
     with sync_playwright() as p:
-        launch_kwargs: dict = {"headless": False}
+        launch_kwargs: dict = {
+            "headless": False,
+            "args": STEALTH_LAUNCH_ARGS,
+        }
         if pw_proxy:
             launch_kwargs["proxy"] = pw_proxy
         browser = p.chromium.launch(**launch_kwargs)
         ctx = browser.new_context(
             locale="vi-VN",
+            timezone_id="Asia/Ho_Chi_Minh",
             viewport={"width": 1366, "height": 820},
+            user_agent=STEALTH_USER_AGENT,
         )
+        apply_stealth(ctx)
         page = ctx.new_page()
+        # Warm-up: vào home trước rồi mới login → giảm flag bot
+        warm_up(page, "https://shopee.vn/")
         page.goto(LOGIN_URL)
         print("==> Đăng nhập Shopee trong cửa sổ trình duyệt.")
         print("    Khi đã thấy trang chủ có avatar của bạn, quay lại terminal")

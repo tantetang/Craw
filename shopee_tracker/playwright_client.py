@@ -20,6 +20,7 @@ from urllib.parse import urlencode
 
 from .client import COOKIE_FILE, ShopeeAPIError
 from .proxy import ProxyConfig, for_playwright, load_proxy
+from .stealth import STEALTH_LAUNCH_ARGS, STEALTH_USER_AGENT, apply_stealth, warm_up
 
 BASE = "https://shopee.vn"
 DEFAULT_PROFILE_DIR = Path("./chrome_profile")
@@ -66,11 +67,15 @@ class PlaywrightShopeeClient:
             "user_data_dir": str(user_data_dir),
             "headless": headless,
             "locale": "vi-VN",
+            "timezone_id": "Asia/Ho_Chi_Minh",
             "viewport": {"width": 1366, "height": 820},
+            "user_agent": STEALTH_USER_AGENT,
+            "args": STEALTH_LAUNCH_ARGS,
         }
         if pw_proxy:
             launch_kwargs["proxy"] = pw_proxy
         self._context = self._pw.chromium.launch_persistent_context(**launch_kwargs)
+        apply_stealth(self._context)
 
         # Seed cookies from cookies.json if persistent profile is empty.
         if cookie_file and cookie_file.exists():
@@ -84,11 +89,8 @@ class PlaywrightShopeeClient:
             self._context.pages[0] if self._context.pages else self._context.new_page()
         )
 
-        # Warm up: visit home so Shopee sets any missing SPC_* cookies.
-        try:
-            self._page.goto(f"{BASE}/", wait_until="domcontentloaded", timeout=30_000)
-        except Exception as e:
-            print(f"[PlaywrightClient] Cảnh báo khi warm-up: {e}")
+        # Warm up: visit home + scroll giả user thật để qua anti-bot check.
+        warm_up(self._page, f"{BASE}/")
         self._current_referer_url: str = f"{BASE}/"
 
     def close(self) -> None:
