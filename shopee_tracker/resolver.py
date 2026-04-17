@@ -6,6 +6,8 @@ import re
 from dataclasses import dataclass
 from urllib.parse import urlparse
 
+from .proxy import for_curl, load_proxy
+
 SHOP_PATH_RE = re.compile(r"^/(?:shop/(?P<shopid>\d+)|(?P<username>[^/?#]+))/?$")
 
 
@@ -20,11 +22,13 @@ def resolve_short_url(url: str, timeout: int = 15) -> str:
     """Follow redirects of a short link and return the final URL."""
     from curl_cffi import requests  # lazy import: only needed for network call
 
+    proxies = for_curl(load_proxy())
     r = requests.get(
         url,
         impersonate="chrome124",
         allow_redirects=True,
         timeout=timeout,
+        proxies=proxies,
     )
     return str(r.url)
 

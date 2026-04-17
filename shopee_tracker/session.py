@@ -15,14 +15,24 @@ from pathlib import Path
 
 from playwright.sync_api import sync_playwright
 
+from .proxy import for_playwright, load_proxy
+
 COOKIE_FILE = Path("cookies.json")
 LOGIN_URL = "https://shopee.vn/buyer/login"
 HOME_URL = "https://shopee.vn/"
 
 
 def run(cookie_file: Path = COOKIE_FILE) -> None:
+    proxy = load_proxy()
+    pw_proxy = for_playwright(proxy)
+    if pw_proxy:
+        print(f"[session] Dùng proxy: {proxy.display()}")
+
     with sync_playwright() as p:
-        browser = p.chromium.launch(headless=False)
+        launch_kwargs: dict = {"headless": False}
+        if pw_proxy:
+            launch_kwargs["proxy"] = pw_proxy
+        browser = p.chromium.launch(**launch_kwargs)
         ctx = browser.new_context(
             locale="vi-VN",
             viewport={"width": 1366, "height": 820},

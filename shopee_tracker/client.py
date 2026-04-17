@@ -13,6 +13,8 @@ import time
 from pathlib import Path
 from typing import Any
 
+from .proxy import ProxyConfig, for_curl, load_proxy
+
 COOKIE_FILE = Path("cookies.json")
 BASE = "https://shopee.vn"
 DEFAULT_IMPERSONATE = "chrome124"
@@ -29,6 +31,7 @@ class ShopeeClient:
         impersonate: str = DEFAULT_IMPERSONATE,
         min_delay: float = 1.8,
         max_delay: float = 4.2,
+        proxy: ProxyConfig | None = None,
     ) -> None:
         from curl_cffi import requests  # lazy: chỉ cần khi thực sự gọi mạng
 
@@ -44,6 +47,11 @@ class ShopeeClient:
                 "Accept": "application/json",
             }
         )
+        if proxy is None:
+            proxy = load_proxy()
+        self._proxies = for_curl(proxy)
+        if self._proxies:
+            print(f"[ShopeeClient] Dùng proxy: {proxy.display()}")
         self._load_cookies(cookie_file)
 
     def close(self) -> None:
@@ -77,7 +85,13 @@ class ShopeeClient:
         headers = {}
         if referer:
             headers["Referer"] = referer
-        r = self.session.get(f"{BASE}{path}", params=params, headers=headers, timeout=20)
+        r = self.session.get(
+            f"{BASE}{path}",
+            params=params,
+            headers=headers,
+            timeout=20,
+            proxies=self._proxies,
+        )
         if r.status_code == 429:
             raise ShopeeAPIError(f"Rate-limited (429) tại {path}. Nghỉ rồi thử lại.")
         if r.status_code >= 400:
@@ -193,8 +207,12 @@ class HybridClient:
         cookie_file: Path = COOKIE_FILE,
         user_data_dir: Path | None = None,
         headless: bool = True,
+        proxy: ProxyConfig | None = None,
     ) -> None:
-        self._curl = ShopeeClient(cookie_file=cookie_file)
+        if proxy is None:
+            proxy = load_proxy()
+        self._proxy = proxy
+        self._curl = ShopeeClient(cookie_file=cookie_file, proxy=proxy)
         self._pw = None  # lazy
         self._blocked = False
         self._cookie_file = cookie_file
@@ -210,6 +228,7 @@ class HybridClient:
                 user_data_dir=self._user_data_dir or DEFAULT_PROFILE_DIR,
                 cookie_file=self._cookie_file,
                 headless=self._headless,
+                proxy=self._proxy,
             )
             self._blocked = True
         return self._pw
