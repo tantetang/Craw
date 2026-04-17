@@ -1,0 +1,17 @@
+shops:
+  # Dạng URL đơn giản
+  # - https://s.shopee.vn/BPvG4PSVy
+
+  # Dạng đầy đủ với metadata
+  - url: https://s.shopee.vn/BPvG4PSVy
+    alias: competitor_a
+    note: "Đối thủ chính mảng thời trang nam"
+    limit: 100      # số SP tối đa mỗi lần crawl
+    full: false     # true → detect SP biến mất (cần limit >= tổng SP shop)
+    engine: curl    # curl | playwright | hybrid
+
+  - url: https://shopee.vn/ten_shop_khac
+    alias: competitor_b
+    note: "Đối thủ mảng phụ kiện"
+    limit: 50
+    engine: hybrid  # tự fallback Playwright nếu curl bị block

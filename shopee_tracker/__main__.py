@@ -2,9 +2,12 @@
 snapshot (with diff vs previous), or show DB history.
 
 Usage:
-    python -m shopee_tracker info    <url> [--limit N]
-    python -m shopee_tracker track   <url> [--limit N] [--full] [--db PATH]
-    python -m shopee_tracker history <url> [-n N] [--db PATH]
+    python -m shopee_tracker info      <url> [--limit N]
+    python -m shopee_tracker track     <url> [--limit N] [--full] [--db PATH]
+    python -m shopee_tracker track-all [--config shops.yaml] [--db PATH]
+    python -m shopee_tracker history   <url> [-n N] [--db PATH]
+    python -m shopee_tracker export    <url> [--out DIR] [--format csv|excel] [--db PATH]
+    python -m shopee_tracker dashboard [--port N] [--db PATH]
 """
 
 from __future__ import annotations
@@ -16,6 +19,7 @@ from pathlib import Path
 
 from . import db
 from .client import HybridClient, ShopeeAPIError, ShopeeClient
+from .config import DEFAULT_CONFIG as DEFAULT_CONFIG_PATH
 from .resolver import ShopRef, resolve
 from .tracker import DiffReport, track_shop
 
@@ -240,6 +244,136 @@ def cmd_track(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_track_all(args: argparse.Namespace) -> int:
+    from .config import DEFAULT_CONFIG, load_shops
+
+    config_path = Path(args.config)
+    try:
+        shops = load_shops(config_path)
+    except (FileNotFoundError, ValueError, ImportError) as e:
+        print(f"Lỗi đọc config: {e}", file=sys.stderr)
+        return 1
+
+    if not shops:
+        print("Config không có shop nào.")
+        return 0
+
+    print(f"[track-all] {len(shops)} shop từ {config_path}\n")
+    errors: list[str] = []
+    for i, entry in enumerate(shops, 1):
+        alias = entry.alias or entry.url
+        print(f"[{i}/{len(shops)}] {alias}")
+        if entry.note:
+            print(f"  note: {entry.note}")
+
+        # merge engine from config vs CLI (CLI wins if not default)
+        engine = args.engine if args.engine != "curl" else entry.engine
+        # build a throwaway Namespace for _build_client
+        fake = argparse.Namespace(engine=engine, show_browser=args.show_browser)
+
+        try:
+            ref = resolve(entry.url)
+        except Exception as e:
+            print(f"  Resolve lỗi: {e}", file=sys.stderr)
+            errors.append(alias)
+            continue
+
+        with _build_client(fake) as client:
+            try:
+                report = track_shop(
+                    ref=ref,
+                    client=client,
+                    limit=entry.limit,
+                    db_path=Path(args.db),
+                    detect_removed=entry.full,
+                )
+            except (ShopeeAPIError, Exception) as e:
+                print(f"  Crawl lỗi: {e}", file=sys.stderr)
+                errors.append(alias)
+                continue
+
+        _print_diff_report(report)
+        print()
+
+    if errors:
+        print(f"\n⚠ {len(errors)} shop lỗi: {', '.join(errors)}", file=sys.stderr)
+        return 1
+    return 0
+
+
+def cmd_export(args: argparse.Namespace) -> int:
+    from .export import export_all, export_excel
+
+    ref = _resolve_or_exit(args.url)
+    db_path = Path(args.db)
+    if not db_path.exists():
+        print(f"DB chưa tồn tại: {db_path}. Chạy `track` trước.", file=sys.stderr)
+        return 1
+
+    with db.connect(db_path) as conn:
+        shopid = None
+        shop_name = None
+        if ref.shopid:
+            shopid = int(ref.shopid)
+        if ref.username:
+            row = db.find_shop_by_username(conn, ref.username)
+            if row:
+                shopid = shopid or int(row["shopid"])
+                shop_name = row["name"] or row["username"]
+        if shopid is None:
+            print("Không tìm thấy shop trong DB.", file=sys.stderr)
+            return 1
+        if shop_name is None:
+            row2 = conn.execute("SELECT name, username FROM shops WHERE shopid=?", (shopid,)).fetchone()
+            if row2:
+                shop_name = row2["name"] or row2["username"] or str(shopid)
+
+    out_dir = Path(args.out)
+    fmt = args.format
+
+    if fmt == "excel":
+        try:
+            out_path = out_dir / f"{(shop_name or str(shopid)).replace(' ', '_')}.xlsx"
+            out_path.parent.mkdir(parents=True, exist_ok=True)
+            export_excel(db_path, shopid, shop_name or "", out_path)
+            print(f"Đã xuất Excel: {out_path}")
+        except ImportError as e:
+            print(f"Lỗi: {e}", file=sys.stderr)
+            return 1
+    else:
+        counts = export_all(db_path, shopid, shop_name or str(shopid), out_dir)
+        for key, n in counts.items():
+            print(f"  {key}: {n} dòng → {out_dir}")
+
+    return 0
+
+
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    import os
+    import shutil
+    import subprocess
+    from . import dashboard as _dash_module
+
+    if shutil.which("streamlit") is None:
+        print(
+            "Streamlit chưa cài. Chạy:\n  pip install streamlit pandas",
+            file=sys.stderr,
+        )
+        return 1
+
+    env = os.environ.copy()
+    env["SHOPEE_TRACKER_DB"] = args.db
+
+    dash_file = Path(_dash_module.__file__)
+    cmd = [
+        "streamlit", "run", str(dash_file),
+        "--server.port", str(args.port),
+        "--server.headless", "true",
+    ]
+    print(f"Mở dashboard tại http://localhost:{args.port}")
+    return subprocess.call(cmd, env=env)
+
+
 def cmd_history(args: argparse.Namespace) -> int:
     ref = _resolve_or_exit(args.url)
     db_path = Path(args.db)
@@ -325,6 +459,32 @@ def build_parser() -> argparse.ArgumentParser:
     p_hist.add_argument("-n", type=int, default=15)
     p_hist.add_argument("--db", default=str(db.DEFAULT_DB))
     p_hist.set_defaults(func=cmd_history)
+
+    p_all = sub.add_parser(
+        "track-all",
+        parents=[engine_parent],
+        help="Crawl tất cả shop trong shops.yaml, lưu snapshot + in diff",
+    )
+    p_all.add_argument("--config", default=str(DEFAULT_CONFIG_PATH), help="Đường dẫn shops.yaml")
+    p_all.add_argument("--db", default=str(db.DEFAULT_DB))
+    p_all.set_defaults(func=cmd_track_all)
+
+    p_export = sub.add_parser("export", help="Xuất dữ liệu ra CSV / Excel")
+    p_export.add_argument("url")
+    p_export.add_argument("--out", default="exports", help="Thư mục đầu ra")
+    p_export.add_argument(
+        "--format",
+        choices=["csv", "excel"],
+        default="csv",
+        help="csv (mặc định) hoặc excel (cần pandas + openpyxl)",
+    )
+    p_export.add_argument("--db", default=str(db.DEFAULT_DB))
+    p_export.set_defaults(func=cmd_export)
+
+    p_dash = sub.add_parser("dashboard", help="Mở Streamlit dashboard")
+    p_dash.add_argument("--port", type=int, default=8501)
+    p_dash.add_argument("--db", default=str(db.DEFAULT_DB))
+    p_dash.set_defaults(func=cmd_dashboard)
 
     return p
 
