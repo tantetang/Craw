@@ -19,6 +19,7 @@ from typing import Any, Iterator
 from urllib.parse import urlencode
 
 from .client import COOKIE_FILE, ShopeeAPIError
+from .proxy import ProxyConfig, for_playwright, load_proxy
 
 BASE = "https://shopee.vn"
 DEFAULT_PROFILE_DIR = Path("./chrome_profile")
@@ -48,18 +49,28 @@ class PlaywrightShopeeClient:
         headless: bool = True,
         min_delay: float = 1.0,
         max_delay: float = 2.5,
+        proxy: ProxyConfig | None = None,
     ) -> None:
         from playwright.sync_api import sync_playwright  # lazy
 
         self.min_delay = min_delay
         self.max_delay = max_delay
+        if proxy is None:
+            proxy = load_proxy()
+        pw_proxy = for_playwright(proxy)
+        if pw_proxy:
+            print(f"[PlaywrightClient] Dùng proxy: {proxy.display()}")
+
         self._pw = sync_playwright().start()
-        self._context = self._pw.chromium.launch_persistent_context(
-            user_data_dir=str(user_data_dir),
-            headless=headless,
-            locale="vi-VN",
-            viewport={"width": 1366, "height": 820},
-        )
+        launch_kwargs: dict[str, Any] = {
+            "user_data_dir": str(user_data_dir),
+            "headless": headless,
+            "locale": "vi-VN",
+            "viewport": {"width": 1366, "height": 820},
+        }
+        if pw_proxy:
+            launch_kwargs["proxy"] = pw_proxy
+        self._context = self._pw.chromium.launch_persistent_context(**launch_kwargs)
 
         # Seed cookies from cookies.json if persistent profile is empty.
         if cookie_file and cookie_file.exists():

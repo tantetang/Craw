@@ -8,6 +8,7 @@ Usage:
     python -m shopee_tracker history   <url> [-n N] [--db PATH]
     python -m shopee_tracker export    <url> [--out DIR] [--format csv|excel] [--db PATH]
     python -m shopee_tracker dashboard [--port N] [--db PATH]
+    python -m shopee_tracker proxy     {show|set|clear|test|enable|disable}
 """
 
 from __future__ import annotations
@@ -374,6 +375,80 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
     return subprocess.call(cmd, env=env)
 
 
+def cmd_proxy(args: argparse.Namespace) -> int:
+    from .proxy import (
+        DEFAULT_PROXY_FILE,
+        ProxyConfig,
+        load_proxy,
+        save_proxy,
+        test_proxy,
+    )
+
+    action = args.action
+
+    if action == "show":
+        cfg = load_proxy()
+        if cfg is None:
+            print("Proxy: (chưa cấu hình hoặc đang disabled)")
+            print(f"  File: {DEFAULT_PROXY_FILE.resolve()}")
+            print(f"  Env:  SHOPEE_PROXY (chưa set)")
+            return 0
+        print(f"Proxy: {cfg.display()}")
+        print(f"  server   = {cfg.server}")
+        print(f"  username = {cfg.username or '(none)'}")
+        print(f"  enabled  = {cfg.enabled}")
+        return 0
+
+    if action == "set":
+        if not args.server:
+            print("Thiếu --server. Ví dụ: --server http://proxy.example.com:8080", file=sys.stderr)
+            return 2
+        cfg = ProxyConfig(
+            server=args.server,
+            username=args.username or "",
+            password=args.password or "",
+            enabled=True,
+        )
+        path = save_proxy(cfg)
+        print(f"Đã lưu proxy → {path}")
+        print(f"  {cfg.display()}")
+        return 0
+
+    if action == "clear":
+        if DEFAULT_PROXY_FILE.exists():
+            DEFAULT_PROXY_FILE.unlink()
+            print(f"Đã xoá {DEFAULT_PROXY_FILE}")
+        else:
+            print(f"{DEFAULT_PROXY_FILE} chưa tồn tại.")
+        return 0
+
+    if action in ("enable", "disable"):
+        if not DEFAULT_PROXY_FILE.exists():
+            print(f"Chưa có {DEFAULT_PROXY_FILE}. Chạy `proxy set` trước.", file=sys.stderr)
+            return 1
+        import json as _json
+        data = _json.loads(DEFAULT_PROXY_FILE.read_text(encoding="utf-8"))
+        data["enabled"] = (action == "enable")
+        DEFAULT_PROXY_FILE.write_text(
+            _json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        print(f"Đã {action} proxy.")
+        return 0
+
+    if action == "test":
+        cfg = load_proxy()
+        if cfg is None:
+            print("Chưa cấu hình proxy.", file=sys.stderr)
+            return 1
+        print(f"Testing {cfg.display()}...")
+        ok, msg = test_proxy(cfg)
+        print(msg)
+        return 0 if ok else 1
+
+    print(f"Action không hợp lệ: {action}", file=sys.stderr)
+    return 2
+
+
 def cmd_history(args: argparse.Namespace) -> int:
     ref = _resolve_or_exit(args.url)
     db_path = Path(args.db)
@@ -485,6 +560,19 @@ def build_parser() -> argparse.ArgumentParser:
     p_dash.add_argument("--port", type=int, default=8501)
     p_dash.add_argument("--db", default=str(db.DEFAULT_DB))
     p_dash.set_defaults(func=cmd_dashboard)
+
+    p_proxy = sub.add_parser(
+        "proxy",
+        help="Quản lý proxy (show/set/clear/test/enable/disable)",
+    )
+    p_proxy.add_argument(
+        "action",
+        choices=["show", "set", "clear", "test", "enable", "disable"],
+    )
+    p_proxy.add_argument("--server", help="Ví dụ: http://proxy.example.com:8080 hoặc socks5://host:port")
+    p_proxy.add_argument("--username", default="")
+    p_proxy.add_argument("--password", default="")
+    p_proxy.set_defaults(func=cmd_proxy)
 
     return p
 

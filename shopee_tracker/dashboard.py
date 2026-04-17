@@ -23,6 +23,13 @@ except ImportError:
     _HAS_PANDAS = False
 
 from . import db
+from .proxy import (
+    DEFAULT_PROXY_FILE,
+    ProxyConfig,
+    load_proxy,
+    save_proxy,
+    test_proxy,
+)
 
 PRICE_DIV = 100_000
 
@@ -134,8 +141,88 @@ def _rows_to_chart_data(rows: list[dict], x_key: str, y_keys: list[str]) -> dict
 # Main app
 # ---------------------------------------------------------------------------
 
+def _render_proxy_sidebar() -> None:
+    """Sidebar expander để xem / set / test / disable proxy."""
+    current = load_proxy()
+    with st.sidebar.expander(
+        f"🌐 Proxy — {'✅ ' + current.display() if current else '(disabled)'}",
+        expanded=False,
+    ):
+        st.caption(f"File: `{DEFAULT_PROXY_FILE.resolve()}`")
+        st.caption(
+            "Proxy áp dụng cho **mọi** request: login Playwright, curl_cffi, fallback, resolver."
+        )
+
+        server_default = current.server if current else ""
+        user_default = current.username if current else ""
+        enabled_default = bool(current and current.enabled)
+
+        with st.form("proxy_form", clear_on_submit=False):
+            server = st.text_input(
+                "Server",
+                value=server_default,
+                placeholder="http://host:port hoặc socks5://host:port",
+            )
+            username = st.text_input("Username (tuỳ chọn)", value=user_default)
+            password = st.text_input(
+                "Password (tuỳ chọn)",
+                value="",
+                type="password",
+                help="Để trống nếu không thay đổi. Mật khẩu hiện tại sẽ được giữ nếu bỏ trống.",
+            )
+            enabled = st.checkbox("Enabled", value=enabled_default)
+
+            col_save, col_test = st.columns(2)
+            save_btn = col_save.form_submit_button("💾 Lưu", use_container_width=True)
+            test_btn = col_test.form_submit_button("🔎 Test", use_container_width=True)
+
+        if save_btn:
+            if not server.strip():
+                st.warning("Nhập server trước khi lưu.")
+            else:
+                # Preserve existing password if user leaves it blank
+                final_pw = password or (current.password if current else "")
+                cfg = ProxyConfig(
+                    server=server.strip(),
+                    username=username.strip(),
+                    password=final_pw,
+                    enabled=enabled,
+                )
+                save_proxy(cfg)
+                st.success(f"Đã lưu proxy: {cfg.display()}")
+                st.rerun()
+
+        if test_btn:
+            cfg_to_test = current
+            if server.strip():
+                final_pw = password or (current.password if current else "")
+                cfg_to_test = ProxyConfig(
+                    server=server.strip(),
+                    username=username.strip(),
+                    password=final_pw,
+                    enabled=True,
+                )
+            if cfg_to_test is None:
+                st.warning("Nhập server hoặc lưu config trước khi test.")
+            else:
+                with st.spinner("Đang test kết nối qua proxy..."):
+                    ok, msg = test_proxy(cfg_to_test)
+                (st.success if ok else st.error)(msg)
+
+        if current and st.button("🗑️ Xoá proxy config"):
+            try:
+                DEFAULT_PROXY_FILE.unlink()
+                st.success("Đã xoá.")
+                st.rerun()
+            except FileNotFoundError:
+                st.info("File không tồn tại.")
+
+
 def main() -> None:
     st.title("🛍️ Shopee Competitor Tracker")
+
+    # --- sidebar: proxy config -----------------------------------------------
+    _render_proxy_sidebar()
 
     # --- sidebar: DB + shop selector ------------------------------------------
     default_db = os.environ.get("SHOPEE_TRACKER_DB", "shopee_tracker.sqlite")
