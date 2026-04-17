@@ -1,5 +1,7 @@
 cookies.json
 chrome_profile/
+shops.yaml
+exports/
 __pycache__/
 *.pyc
 *.pyo
